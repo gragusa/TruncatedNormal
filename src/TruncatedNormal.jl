@@ -1,6 +1,280 @@
 module TruncatedNormal
 
 include("table.jl")
+dlopen("../deps/mvt.dylib", 1)
+
+
+using Distributions
+import Base.cor 
+import Distributions.cdf
+
+    
+
+function mvt(N::Int64,
+             NU::Int64,
+             LOWER::StridedArray{Float64},
+             UPPER::StridedArray{Float64},
+             INFIN::Vector{Int64},
+             CORREL::StridedArray{Float64},
+             DELTA::StridedArray{Float64},
+             MAXPTS::Int64,
+             ABSEPS::Float64,
+             RELEPS::Float64,
+             ERROR::Vector{Float64},
+             VALUE::Vector{Float64})
+
+    INFIN_ = Array(Int32, N)
+    for(j in 1:N)
+        INFIN_[j] = INFIN[j]
+    end 
+
+    INFO = Int32[1]
+
+
+
+ ## MVTDST( N, NU, LOWER, UPPER, INFIN, CORREL, DELTA, 
+ ##         MAXPTS, ABSEPS, RELEPS, ERROR, VALUE, INFORM )
+
+ ##     N      INTEGER, the number of variables.    
+ ##     NU     INTEGER, the number of degrees of freedom.
+ ##            If NU < 1, then an MVN probability is computed.
+ ##     LOWER  DOUBLE PRECISION, array of lower integration limits.
+ ##     UPPER  DOUBLE PRECISION, array of upper integration limits.
+ ##     INFIN  INTEGER, array of integration limits flags:
+ ##             if INFIN(I) < 0, Ith limits are (-infinity, infinity);
+ ##             if INFIN(I) = 0, Ith limits are (-infinity, UPPER(I)];
+ ##             if INFIN(I) = 1, Ith limits are [LOWER(I), infinity);
+ ##             if INFIN(I) = 2, Ith limits are [LOWER(I), UPPER(I)].
+ ##     CORREL DOUBLE PRECISION, array of correlation coefficients; 
+ ##            the correlation coefficient in row I column J of the 
+ ##            correlation matrixshould be stored in 
+ ##               CORREL( J + ((I-2)(I-1))/2 ), for J < I.
+ ##            The correlation matrix must be positive semi-definite.
+ ##     DELTA  DOUBLE PRECISION, array of non-centrality parameters.
+ ##     MAXPTS INTEGER, maximum number of function values allowed. This 
+ ##            parameter can be used to limit the time. A sensible 
+ ##            strategy is to start with MAXPTS = 1000N, and then
+ ##            increase MAXPTS if ERROR is too large.
+ ##     ABSEPS DOUBLE PRECISION absolute error tolerance.
+ ##     RELEPS DOUBLE PRECISION relative error tolerance.
+ ##     ERROR  DOUBLE PRECISION estimated absolute error, 
+ ##            with 99% confidence level.
+ ##     VALUE  DOUBLE PRECISION estimated value for the integral
+
+    ccall( (:mvtdst_, "mvt"), Void, (Ptr{Int32},    
+                                    Ptr{Int32},
+                                    Ptr{Float64},
+                                    Ptr{Float64},
+                                    Ptr{Int32},
+                                    Ptr{Float64},
+                                    Ptr{Float64},
+                                    Ptr{Int32},
+                                    Ptr{Float64},
+                                    Ptr{Float64},
+                                    Ptr{Float64},
+                                    Ptr{Float64},
+                                    Ptr{Int32}),
+          &N, &NU, LOWER, UPPER, INFIN_, CORREL, DELTA, &MAXPTS, &ABSEPS, &RELEPS, ERROR, VALUE, INFO )
+    
+    return INFO, ERROR, VALUE
+    
+end
+
+
+function pmvnorm(N::Int64,                 
+                 LOWER::Vector{Float64},
+                 UPPER::Vector{Float64},             
+                 CORREL::Vector{Float64},
+                 DELTA::Vector{Float64})
+
+    if(length(LOWER)!=N || length(UPPER)!=N || length(DELTA)!=N)
+        throw("Dimensions are inconsistent")
+    end
+
+    if(any(LOWER.>UPPER))
+        throw("At leat one 'lower>UPPER'")
+    end
+
+    NU     = -1
+    MAXPTS = 50000
+    ABSEPS = 0.0
+    RELEPS = 0.0004
+    ERROR  = [0.0]
+    VALUE  = [0.0]
+    INFIN  = Array(Int64, N)
+
+    for(j in 1:N)
+        if(isinf(LOWER[j]) && isinf(UPPER[j]))
+            INFIN[j] = -1
+        elseif isinf(LOWER[j])
+            INFIN[j] = 0
+        elseif isinf(UPPER[j])
+            INFIN[j] = 1
+        else
+            INFIN[j] = 2
+        end
+    end
+
+    info, value, error = mvt(N, NU, LOWER, UPPER, INFIN, CORREL, DELTA, MAXPTS, ABSEPS, RELEPS, ERROR, VALUE)
+
+    return info, value, error
+end 
+
+
+
+## mvt(2,
+##     1,
+##     [0., 0.],
+##     [1., 1.],
+##     [0, 0],
+##     [0.5],
+##     [1.0 ,1.0],
+##     25000,
+##     0.0,
+##     0.0005,
+##     [0.0],
+##     [0.0])
+
+
+function cor(d::MvNormal)
+    corr = zeros(D.dim, D.dim)
+    for(j in 1:D.dim)
+        for(i in 1:D.dim)
+            corr[i,j] = D.Σ.mat[i,j]/sqrt(D.Σ.mat[i,i]*D.Σ.mat[j,j])
+        end
+    end
+    return(corr)
+end 
+
+
+function cdf(d::MvNormal, lower::Vector{Float64}, upper::Vector{Float64})
+    N     = D.dim    
+    NN    = convert(Int64, (N-1)*N/2)
+    Sigma = cov(D)
+    
+    if(length(lower)!=N || length(upper)!=N)
+        throw("Wrong dimension")
+    end
+
+    if(any(lower.>upper))
+       throw("Wrong dimension")
+    end
+
+    DELTA  = D.μ
+    
+    CORREL = Array(Float64, NN)
+    for i = 1:N, j = 1:(i-1)
+        CORREL[ j + ((i-2)*(i-1))/2 ] = Sigma[i,j]/sqrt(Sigma[i,i]*Sigma[j,j])
+    end
+    
+    INFO, ERROR, VALUE = pmvnorm(N, lower, upper, CORREL, DELTA)
+    return VALUE[1]
+
+end
+    
+
+function rmvnorm(N::Int64, mean::Vector, Sigma::Matrix, lower::Vector, upper::Vector, LC::Matrix)
+
+    K    = length(mean)
+    Y    = zeros(K, N)
+    ns   = N
+    nast = 0
+
+    D = MvNormal(mean, Sigma)    
+    alpha = cdf(D, lower, upper)
+
+    while ns>0
+        np  = begin
+            if ns/alpha>10000
+                ns
+            else
+                int(ceil(maximum([ns/alpha, 10.])))
+            end
+        end 
+
+        X  = rand(D, np)
+        X2 = LC*X
+        ind = Array(Bool, np)
+        for i = 1:np
+            ind[i] = all( (X2[:,i] .>= lower) & (X2[:,i] .<= upper) )
+        end 
+        
+        nas = length(ind[ind])
+        
+        if(length(nas)==0 || nas==0)
+            continue
+        end
+
+        alpha = nas/np
+
+        nns = minimum([nas, ns])
+
+        Y[:, (nast + 1):(nast + nns)] = X[:, find(ind)[1:nns]]
+
+        nast = nast + nas
+
+        ns = ns - nas
+    end
+
+    return Y
+end 
+
+@time rtmvnorm2(1, D.μ, cov(D), lower, upper, diagm([1, 1, 1]))        
+
+function dmvnorm(mean::Vector, Sigma::Matrix, lower::Vector, upper::Vector)
+    D = MvNormal(mean, Sigma)
+    logpdf(D) - log(cdf(D, lower, upper))
+end 
+    
+
+abstract AbstractTruncatedMvNormal <: ContinuousMultivariateDistribution
+
+immutable GenericTruncatedMvNormal{Cov<:AbstractPDMat} <: AbstractTruncatedMvNormal
+    dim::Int
+    zeromean::Bool
+    μ::Vector{Float64}
+    Σ::Cov
+    lower::Vector{Float64}
+    upper::Vector{Float64}
+end
+
+    
+D = MvNormal([1.,1,1], [2. 0.75 0.65; 0.75 1 0.65; 0.75 0.65 1])    
+    
+@time cdf(D, [0., 0, 0], [3, 3, 3.])    
+
+
+
+type Truncated{D<:GenericMvNormal}
+    untruncated::D
+    lower::Float64
+    upper::Float64
+    nc::Float64
+    function Truncated{T<:GenericMvNormal}(d::T, l::Real, u::Real, nc::Real)
+        if l >= u
+        error("upper must be > lower")
+    end
+        new(d, float64(l), float64(u), float64(nc))
+    end
+end
+
+
+
+
+D = Normal(0., 1.)
+
+Truncated(D, 0., +Inf, .2)
+
+d = TruncatedNo(D, 0., +Inf, 0.)
+
+rand(100, d)
+
+function cdf!(r::Array{Float64}, d::AbstractMvNormal, x::Matrix{Float64})
+    
+
+
+
+
 
 function rtnorm(n::Int64, μ::Real, σ::Real, a::Real, b::Real)
     a = (a-μ)/σ 
